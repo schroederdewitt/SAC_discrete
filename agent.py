@@ -13,7 +13,8 @@ class SAC(nn.Module):
     def __init__(self,
                         state_size,
                         action_size,
-                        device
+                        device,
+                        log_beta
                 ):
         """Initialize an Agent object.
         
@@ -26,6 +27,7 @@ class SAC(nn.Module):
         super(SAC, self).__init__()
         self.state_size = state_size
         self.action_size = action_size
+        self.log_beta = log_beta
 
         self.device = device
         
@@ -37,9 +39,14 @@ class SAC(nn.Module):
 
         self.target_entropy = -action_size  # -dim(A)
 
-        self.log_alpha = torch.tensor([0.0], requires_grad=True)
-        self.alpha = self.log_alpha.exp().detach()
-        self.alpha_optimizer = optim.Adam(params=[self.log_alpha], lr=learning_rate) 
+        if self.log_beta is None:
+            self.log_alpha = torch.tensor([0.0], requires_grad=True)
+            self.alpha = self.log_alpha.exp().detach()
+            self.alpha_optimizer = optim.Adam(params=[self.log_alpha], lr=learning_rate)
+        else:
+            import math
+            self.alpha = torch.Tensor([math.exp(-self.log_beta)])
+            print("Set log_beta to {} (alpha={}).".format(self.log_beta, self.alpha))
                 
         # Actor Network 
 
@@ -104,11 +111,13 @@ class SAC(nn.Module):
         self.actor_optimizer.step()
         
         # Compute alpha loss
-        alpha_loss = - (self.log_alpha.exp() * (log_pis.cpu() + self.target_entropy).detach().cpu()).mean()
-        self.alpha_optimizer.zero_grad()
-        alpha_loss.backward()
-        self.alpha_optimizer.step()
-        self.alpha = self.log_alpha.exp().detach()
+        alpha_loss = None
+        if self.log_beta is None:
+            alpha_loss = - (self.log_alpha.exp() * (log_pis.cpu() + self.target_entropy).detach().cpu()).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            self.alpha = self.log_alpha.exp().detach()
 
         # ---------------------------- update critic ---------------------------- #
         # Get predicted next-state actions and Q values from target models
@@ -144,7 +153,7 @@ class SAC(nn.Module):
         self.soft_update(self.critic1, self.critic1_target)
         self.soft_update(self.critic2, self.critic2_target)
         
-        return actor_loss.item(), alpha_loss.item(), critic1_loss.item(), critic2_loss.item(), current_alpha
+        return actor_loss.item() , alpha_loss.item()if alpha_loss is not None else None, critic1_loss.item(), critic2_loss.item(), current_alpha
 
     def soft_update(self, local_model , target_model):
         """Soft update model parameters.

@@ -1,7 +1,7 @@
 
 
 import gym
-import pybullet_envs
+#import pybullet_envs
 import numpy as np
 from collections import deque
 import torch
@@ -23,11 +23,40 @@ def get_config():
     parser.add_argument("--log_video", type=int, default=0, help="Log agent behaviour to wanbd when set to 1, default: 0")
     parser.add_argument("--save_every", type=int, default=100, help="Saves the network every x epochs, default: 25")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size, default: 256")
+    parser.add_argument("--log_beta", type=float, default=None, help="log-beta")
+    parser.add_argument("--autotune", type=int, default=1, help="whether to use log_beta")
+    parser.add_argument("--save_policy_every_n_steps", type=int, default=1, nargs="?", const=True,
+        help="save policy model")
     
     args = parser.parse_args()
     return args
 
+import os
+
+class PolicySaver():
+
+    def __init__(self, path):
+        self.path = path
+        self._last_filepath = None
+        self._last_r = None
+
+    def save(self, network, r, filename):
+        filepath = os.path.join(self.path, filename)
+        save = False
+        if self._last_r is not None:
+            if self._last_r <= self._last_r:
+                save = True
+        else:
+            save = True
+        self._last_r = r
+        if save:
+            torch.save(network.state_dict(), filepath)
+        if self._last_filepath is not None:
+            os.remove(self._last_filepath)
+        self._last_filepath = filepath
+
 def train(config):
+
     np.random.seed(config.seed)
     random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -41,12 +70,20 @@ def train(config):
     steps = 0
     average10 = deque(maxlen=10)
     total_steps = 0
-    
+
+    path = "./store"
+    if not os.path.exists(path):
+        os.makedirs(path)
+    policy_saver = PolicySaver(path)
+
+    old_global_step_save = 0
+    last_return = None
     with wandb.init(project="SAC_Discrete", name=config.run_name, config=config):
         
         agent = SAC(state_size=env.observation_space.shape[0],
                          action_size=env.action_space.n,
-                         device=device)
+                         device=device,
+                         log_beta=config.log_beta if not config.autotune else None)
 
         wandb.watch(agent, log="gradients", log_freq=10)
 
@@ -73,11 +110,10 @@ def train(config):
                 if done:
                     break
 
-            
-
             average10.append(rewards)
+            current_return = rewards
             total_steps += episode_steps
-            print("Episode: {} | Reward: {} | Polciy Loss: {} | Steps: {}".format(i, rewards, policy_loss, steps,))
+            print("Episode: {} | Reward: {} | Policy Loss: {} | Steps: {} | alpha: {}".format(i, rewards, policy_loss, steps, current_alpha.item()))
             
             wandb.log({"Reward": rewards,
                        "Average10": np.mean(average10),
@@ -99,6 +135,21 @@ def train(config):
 
             if i % config.save_every == 0:
                 save(config, save_name="SAC_discrete", model=agent.actor_local, wandb=wandb, ep=0)
+
+            global_step = i
+            if (global_step - old_global_step_save) >= config.save_policy_every_n_steps:
+                if last_return is None or current_return > last_return:
+                    logb = config.log_beta if not config.autotune else "AUTO"
+                    print("Saving model...")
+                    policy_saver.save(agent.actor_local,
+                                      current_return,
+                                      "trace-{}-logbeta{}-step{}-perf{}-actor.pth".format(config.env,
+                                                                                         logb,
+                                                                                         global_step,
+                                                                                         current_return))
+
+                    last_return = current_return
+                old_global_step_save = global_step
 
 if __name__ == "__main__":
     config = get_config()
